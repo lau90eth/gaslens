@@ -1,0 +1,11 @@
+[
+  {"type":"function","name":"submitBatch","selector":"0x12345678",
+   "inputs":[
+     {"name":"batchData","type":"bytes"},{"name":"stateRoot","type":"bytes32"},
+     {"name":"proofs","type":"bytes[]"}],
+   "stateMutability":"nonpayable"},
+  {"type":"function","name":"verifyAggregatedProof","selector":"0xabcdef01",
+   "inputs":[
+     {"name":"proof","type":"bytes"},{"name":"publicInputs","type":"uint256[]"}],
+   "stateMutability":"view"}
+]

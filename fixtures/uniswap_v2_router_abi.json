@@ -1,0 +1,26 @@
+[
+  {"type":"function","name":"swapExactTokensForETH","selector":"0x18cbafe5",
+   "inputs":[
+     {"name":"amountIn","type":"uint256"},{"name":"amountOutMin","type":"uint256"},
+     {"name":"path","type":"address[]"},{"name":"to","type":"address"},
+     {"name":"deadline","type":"uint256"}],
+   "stateMutability":"nonpayable"},
+  {"type":"function","name":"swapExactTokensForTokens","selector":"0x38ed1739",
+   "inputs":[
+     {"name":"amountIn","type":"uint256"},{"name":"amountOutMin","type":"uint256"},
+     {"name":"path","type":"address[]"},{"name":"to","type":"address"},
+     {"name":"deadline","type":"uint256"}],
+   "stateMutability":"nonpayable"},
+  {"type":"function","name":"addLiquidity","selector":"0xe8e33700",
+   "inputs":[
+     {"name":"tokenA","type":"address"},{"name":"tokenB","type":"address"},
+     {"name":"amountADesired","type":"uint256"},{"name":"amountBDesired","type":"uint256"},
+     {"name":"amountAMin","type":"uint256"},{"name":"amountBMin","type":"uint256"},
+     {"name":"to","type":"address"},{"name":"deadline","type":"uint256"}],
+   "stateMutability":"nonpayable"},
+  {"type":"function","name":"quote","selector":"0xad615dec",
+   "inputs":[
+     {"name":"amountA","type":"uint256"},{"name":"reserveA","type":"uint256"},
+     {"name":"reserveB","type":"uint256"}],
+   "stateMutability":"pure"}
+]
