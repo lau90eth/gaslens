@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-GasLens — Glamsterdam Gas Cost Simulator v0.3.4 (Refined Heuristics)
+GasLens — EIP-7976 Calldata Floor Analyzer
 """
 
 import json
@@ -8,54 +8,55 @@ import sys
 import urllib.request
 import ssl
 from dataclasses import dataclass
+from pathlib import Path
+
+# Add glamlib to path (local clone)
+glamlib_path = Path(__file__).parent / "glamlib_local"
+if glamlib_path.exists():
+    sys.path.insert(0, str(glamlib_path))
+else:
+    # Try home directory
+    glamlib_home = Path.home() / "glamlib"
+    if glamlib_home.exists():
+        sys.path.insert(0, str(glamlib_home))
+    else:
+        print("Error: glamlib not found. Clone: git clone https://github.com/lau90eth/glamlib.git", file=sys.stderr)
+        sys.exit(1)
+
+from glamlib.eips import EIP_7976_FLOOR_PRE, EIP_7976_FLOOR_POST
+from glamlib.calldata import count_calldata_tokens, calldata_floor_cost
 
 
+# SSL workaround for WSL
 ssl_context = ssl.create_default_context()
 ssl_context.check_hostname = False
 ssl_context.verify_mode = ssl.CERT_NONE
 
-CALLDATA_FLOOR_PRE = 10
-CALLDATA_FLOOR_POST = 64
-COST_NEW_ACCOUNT_PRE = 25_000
-COST_SSTORE_INIT_PRE = 20_000
-CPSB = 1530
-COST_NEW_ACCOUNT_POST = 120 * CPSB
-COST_SSTORE_INIT_POST = 64 * CPSB
-
 
 @dataclass
-class PriceConfig:
-    eth_price_usd: float = 3500.0
-    gas_price_gwei: float = 20.0
-    def gas_to_usd(self, gas: int) -> float:
-        return gas * self.gas_price_gwei * 1e-9 * self.eth_price_usd
-
-
-@dataclass
-class GasBreakdown:
-    calldata: int = 0
-    state_creation: int = 0
-    base_execution: int = 21_000
-    total: int = 0
-
-
-@dataclass
-class FunctionEstimate:
+class FunctionAnalysis:
     function_name: str
     selector: str
-    pre_gas: GasBreakdown
-    post_gas: GasBreakdown
-    pre_usd: float = 0.0
-    post_usd: float = 0.0
-    delta_pct: float = 0.0
-    risk_level: str = ""
+    calldata_bytes: int
+    tokens: int
+    floor_pre: int
+    floor_post: int
+    headroom_pre: int
+    headroom_post: int
+    is_floor_dominated_pre: bool
+    is_floor_dominated_post: bool
 
 
 def abi_type_size(abi_type: str) -> int:
     if abi_type in ("address", "bool") or abi_type.startswith(("uint", "int")):
         return 32
-    elif abi_type in ("bytes", "string") or abi_type.endswith("[]") or abi_type.startswith(("bytes", "string")):
+    elif abi_type == "bytes" or abi_type.startswith("string"):
         return 64
+    elif abi_type.endswith("[]"):
+        return 64
+    elif abi_type.startswith("bytes"):
+        n = int(abi_type[5:]) if len(abi_type) > 5 else 1
+        return ((n + 31) // 32) * 32
     return 32
 
 
@@ -66,90 +67,73 @@ def function_calldata_size(function_abi: dict) -> int:
     return size
 
 
-def count_calldata_tokens(data_bytes: bytes) -> int:
-    tokens = 0
-    i = 0
-    while i < len(data_bytes):
-        if i + 3 < len(data_bytes) and all(b != 0 for b in data_bytes[i:i+4]):
-            tokens += 1
-            i += 4
-        else:
-            tokens += 1
-            i += 1
-    return tokens
-
-
-def calldata_cost(data_bytes: bytes, floor_per_token: int) -> int:
-    return count_calldata_tokens(data_bytes) * floor_per_token
-
-
-def estimate_function(function_abi: dict, config: PriceConfig, contract_hints: dict = None) -> FunctionEstimate:
+def analyze_function(function_abi: dict) -> FunctionAnalysis:
     name = function_abi.get("name", "unknown")
     selector = function_abi.get("selector", "0x????????")
     
     calldata_size = function_calldata_size(function_abi)
     calldata_bytes = b'\x00' * calldata_size
     
-    calldata_pre = calldata_cost(calldata_bytes, CALLDATA_FLOOR_PRE)
-    calldata_post = calldata_cost(calldata_bytes, CALLDATA_FLOOR_POST)
+    tokens = count_calldata_tokens(calldata_bytes)
+    floor_pre = calldata_floor_cost(calldata_bytes, pre=True)
+    floor_post = calldata_floor_cost(calldata_bytes, pre=False)
     
-    # Refined heuristics
-    state_pre = state_post = 0
+    headroom_pre = max(0, floor_pre - 21_000)
+    headroom_post = max(0, floor_post - 21_000)
     
-    # Only factory/creation functions get new account cost
-    if any(kw in name.lower() for kw in ["factory", "create", "deploy", "init", "constructor"]):
-        state_pre = COST_NEW_ACCOUNT_PRE
-        state_post = COST_NEW_ACCOUNT_POST
+    typical_execution = 100_000
+    is_dominated_pre = typical_execution < headroom_pre
+    is_dominated_post = typical_execution < headroom_post
     
-    # SSTORE only for functions that CLEARLY write state (not swap/transfer which delegate)
-    elif any(kw in name.lower() for kw in ["mint", "burn", "set", "add", "register", "update", "store"]):
-        # But NOT "swap", "transfer", "remove" which typically delegate
-        if not any(bad in name.lower() for bad in ["swap", "transfer", "remove", "quote", "get", "weth"]):
-            state_pre = COST_SSTORE_INIT_PRE
-            state_post = COST_SSTORE_INIT_POST
-    
-    pre = GasBreakdown(calldata_pre, state_pre, 21_000, 21_000 + calldata_pre + state_pre)
-    post = GasBreakdown(calldata_post, state_post, 21_000, 21_000 + calldata_post + state_post)
-    
-    pre_usd = config.gas_to_usd(pre.total)
-    post_usd = config.gas_to_usd(post.total)
-    delta_pct = ((post.total - pre.total) / pre.total * 100) if pre.total > 0 else 0
-    
-    if delta_pct > 200:
-        risk = "CRITICAL"
-    elif delta_pct > 50:
-        risk = "HIGH"
-    elif delta_pct > 10:
-        risk = "MODERATE"
-    elif delta_pct > 0:
-        risk = "LOW"
-    else:
-        risk = "NONE"
-    
-    return FunctionEstimate(name, selector, pre, post, pre_usd, post_usd, delta_pct, risk)
+    return FunctionAnalysis(
+        function_name=name,
+        selector=selector,
+        calldata_bytes=calldata_size,
+        tokens=tokens,
+        floor_pre=floor_pre,
+        floor_post=floor_post,
+        headroom_pre=headroom_pre,
+        headroom_post=headroom_post,
+        is_floor_dominated_pre=is_dominated_pre,
+        is_floor_dominated_post=is_dominated_post,
+    )
 
 
-def analyze_abi(abi_json: list, config: PriceConfig) -> list[FunctionEstimate]:
+def analyze_abi(abi_json: list) -> list[FunctionAnalysis]:
     results = []
     for item in abi_json:
         if item.get("type") == "function":
-            results.append(estimate_function(item, config))
-    results.sort(key=lambda x: x.delta_pct, reverse=True)
+            results.append(analyze_function(item))
+    results.sort(key=lambda x: x.floor_post, reverse=True)
     return results
 
 
-def print_report(results: list[FunctionEstimate], config: PriceConfig, name: str = "Unknown"):
+def print_report(results: list[FunctionAnalysis], contract_name: str = "Unknown"):
     print(f"\n{'='*80}")
-    print(f"GasLens — Glamsterdam Cost Analysis: {name}")
+    print(f"GasLens — EIP-7976 Calldata Floor Analysis: {contract_name}")
     print(f"{'='*80}")
-    print(f"ETH: ${config.eth_price_usd:,.0f} | Gas: {config.gas_price_gwei} gwei")
+    print("WARNING: This tool estimates CALDATA costs only.")
+    print("Real tx cost = 21,000 intrinsic + execution_gas + calldata_cost")
     print("-" * 80)
     
-    for est in results:
-        print(f"\n[{est.risk_level}] {est.function_name} ({est.selector})")
-        print(f"  Gas:  {est.pre_gas.total:>12,} → {est.post_gas.total:>12,} ({est.delta_pct:+.1f}%)")
-        print(f"  USD:  ${est.pre_usd:>10.2f} → ${est.post_usd:>10.2f} (+${est.post_usd-est.pre_usd:+.2f})")
-        print(f"  Breakdown: calldata {est.pre_gas.calldata:,}→{est.post_gas.calldata:,}, state {est.pre_gas.state_creation:,}→{est.post_gas.state_creation:,}")
+    for r in results:
+        if r.is_floor_dominated_post and not r.is_floor_dominated_pre:
+            status = "🚨 NEWLY FLOOR-DOMINATED"
+        elif r.is_floor_dominated_post and r.is_floor_dominated_pre:
+            status = "⚠️ STILL FLOOR-DOMINATED"
+        elif not r.is_floor_dominated_post and r.is_floor_dominated_pre:
+            status = "✅ NO LONGER FLOOR-DOMINATED"
+        else:
+            status = "ℹ️ NEVER FLOOR-DOMINATED"
+        
+        print(f"\n{status}  {r.function_name} ({r.selector})")
+        print(f"  Calldata: {r.calldata_bytes} bytes → {r.tokens} tokens")
+        print(f"  Floor cost: {r.floor_pre:,} gas → {r.floor_post:,} gas (+{((r.floor_post-r.floor_pre)/r.floor_pre*100):.0f}%)")
+        print(f"  Headroom: {r.headroom_pre:,} → {r.headroom_post:,} execution gas before not floor-dominated")
+    
+    newly = sum(1 for r in results if r.is_floor_dominated_post and not r.is_floor_dominated_pre)
+    print(f"\n{'='*80}")
+    print(f"SUMMARY: {len(results)} functions | {newly} newly floor-dominated post-Glamsterdam")
 
 
 def fetch_etherscan_v2(address: str, api_key: str) -> list:
@@ -174,8 +158,6 @@ def main():
     ap.add_argument("--etherscan", help="Contract address")
     ap.add_argument("--api-key", help="Etherscan API key")
     ap.add_argument("--name", default="Unknown")
-    ap.add_argument("--eth-price", type=float, default=3500.0)
-    ap.add_argument("--gas-price", type=float, default=20.0)
     args = ap.parse_args()
     
     abi = []
@@ -190,15 +172,8 @@ def main():
         print("Provide --abi or --etherscan + --api-key", file=sys.stderr)
         sys.exit(1)
     
-    config = PriceConfig(args.eth_price, args.gas_price)
-    results = analyze_abi(abi, config)
-    print_report(results, config, args.name)
-    
-    critical = sum(1 for r in results if r.delta_pct > 200)
-    high = sum(1 for r in results if 50 < r.delta_pct <= 200)
-    moderate = sum(1 for r in results if 10 < r.delta_pct <= 50)
-    print(f"\n{'='*80}")
-    print(f"SUMMARY: {len(results)} functions | {critical} CRITICAL | {high} HIGH | {moderate} MODERATE")
+    results = analyze_abi(abi)
+    print_report(results, args.name)
 
 
 if __name__ == "__main__":
