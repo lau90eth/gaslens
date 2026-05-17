@@ -1,0 +1,16 @@
+[
+  {"type":"function","name":"transfer","selector":"0xa9059cbb",
+   "inputs":[{"name":"to","type":"address"},{"name":"amount","type":"uint256"}],
+   "stateMutability":"nonpayable"},
+  {"type":"function","name":"approve","selector":"0x095ea7b3",
+   "inputs":[{"name":"spender","type":"address"},{"name":"amount","type":"uint256"}],
+   "stateMutability":"nonpayable"},
+  {"type":"function","name":"balanceOf","selector":"0x70a08231",
+   "inputs":[{"name":"account","type":"address"}],
+   "stateMutability":"view"},
+  {"type":"function","name":"transferFrom","selector":"0x23b872dd",
+   "inputs":[
+     {"name":"from","type":"address"},{"name":"to","type":"address"},
+     {"name":"amount","type":"uint256"}],
+   "stateMutability":"nonpayable"}
+]
